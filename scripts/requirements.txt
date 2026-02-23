@@ -1,0 +1,7 @@
+# Redis 高速存取
+redis>=5.0.0
+requests-unixsocket>=0.4.1
+
+# 未來做時間序列分析與策略計算的必備武器 (預留)
+# pandas>=2.0.0
+# numpy>=1.24.0
