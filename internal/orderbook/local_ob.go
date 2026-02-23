@@ -1,7 +1,7 @@
 package orderbook
 
 import (
-	"BinanceAutoBot/internal/binance"
+	"BinanceAutoBot2/internal/binance"
 	"log"
 	"sort"
 	"strconv"

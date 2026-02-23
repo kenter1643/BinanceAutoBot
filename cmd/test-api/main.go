@@ -5,8 +5,8 @@ package main
 import (
 	"log"
 
-	"BinanceAutoBot/internal/binance"
-	"BinanceAutoBot/internal/config"
+	"BinanceAutoBot2/internal/binance"
+	"BinanceAutoBot2/internal/config"
 )
 
 func main() {

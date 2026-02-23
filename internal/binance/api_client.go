@@ -313,3 +313,50 @@ func (c *APIClient) GetListenKey() (string, error) {
 	}
 	return "", fmt.Errorf("未找到 listenKey: %s", string(body))
 }
+
+// GetPosition 主动调用 REST API 查询指定交易对的当前真实持仓
+func (c *APIClient) GetPosition(symbol string) (string, string, error) {
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("timestamp", fmt.Sprintf("%d", time.Now().UnixMilli()))
+	params.Add("recvWindow", "5000")
+
+	queryString := params.Encode()
+	mac := hmac.New(sha256.New, []byte(c.APISecret))
+	mac.Write([]byte(queryString))
+	signature := hex.EncodeToString(mac.Sum(nil))
+
+	// 币安 U本位合约查询仓位风险接口为 /fapi/v2/positionRisk
+	reqURL := fmt.Sprintf("%s/fapi/v2/positionRisk?%s&signature=%s", c.BaseURL, queryString, signature)
+
+	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	if err != nil {
+		return "0.0", "0.0", err
+	}
+	req.Header.Set("X-MBX-APIKEY", c.APIKey)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return "0.0", "0.0", err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "0.0", "0.0", fmt.Errorf("API 报错: %s", string(body))
+	}
+
+	var positions []map[string]interface{}
+	if err := json.Unmarshal(body, &positions); err != nil {
+		return "0.0", "0.0", fmt.Errorf("JSON 解析失敗")
+	}
+
+	// 🌟 同時提取 positionAmt (持倉數量) 和 entryPrice (開倉均價)
+	if len(positions) > 0 {
+		amt, _ := positions[0]["positionAmt"].(string)
+		ep, _ := positions[0]["entryPrice"].(string)
+		return amt, ep, nil
+	}
+
+	return "0.0", "0.0", nil
+}

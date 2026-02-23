@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"BinanceAutoBot/internal/binance"
-	"BinanceAutoBot/internal/config"
-	"BinanceAutoBot/internal/orderbook"
+	"BinanceAutoBot2/internal/binance"
+	"BinanceAutoBot2/internal/config"
+	"BinanceAutoBot2/internal/orderbook"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -68,6 +68,19 @@ func main() {
 	// ==========================================
 
 	// ==========================================
+	// 🌟 新增：初始仓位兜底盘点
+	// ==========================================
+	// 🌟 修改處 1：初始倉位兜底盤點 (約 80 行附近)
+	if initialPos, initialEp, err := apiClient.GetPosition(symbol); err == nil {
+		_ = rdb.Set(ctx, "Position:"+symbol, initialPos, 0).Err()
+		_ = rdb.Set(ctx, "EntryPrice:"+symbol, initialEp, 0).Err() // 寫入均價
+		log.Printf("[Main] 📦 初始倉位盤點: %s 持倉 = %s | 均價 = %s", symbol, initialPos, initialEp)
+	} else {
+		log.Printf("[Main] ⚠️ 初始仓位盘点失败: %v", err)
+	}
+	// ==========================================
+
+	// ==========================================
 	// 🌟 新增：启动私有资产监听通道，并同步至 Redis
 	// ==========================================
 	listenKey, err := apiClient.GetListenKey()
@@ -80,22 +93,18 @@ func main() {
 			wsBase = "wss://fstream.binance.com/ws/" // 主网
 		}
 		userDataWSURL := wsBase + listenKey
-
+		// 🌟 修改處 2：UserDataStream 推送更新 (約 100 行附近)
 		go binance.StartUserDataStream(ctx, userDataWSURL, func(event binance.UserDataEvent) {
-			// 1. 提取可用 USDT 余额并写入 Redis
 			for _, bal := range event.Account.Balances {
 				if bal.Asset == "USDT" {
-					// 写入 Redis 键名: Wallet:USDT
 					_ = rdb.Set(ctx, "Wallet:USDT", bal.Balance, 0).Err()
-					log.Printf("💰 [资产更新] USDT 余额变动: %s", bal.Balance)
 				}
 			}
-			// 2. 提取当前监控交易对的持仓量并写入 Redis
 			for _, pos := range event.Account.Positions {
 				if pos.Symbol == symbol {
-					// 写入 Redis 键名: Position:BTCUSDT
 					_ = rdb.Set(ctx, "Position:"+symbol, pos.Amount, 0).Err()
-					log.Printf("📦 [仓位更新] %s 当前真实持仓: %s", symbol, pos.Amount)
+					_ = rdb.Set(ctx, "EntryPrice:"+symbol, pos.EntryPrice, 0).Err() // 同步更新均價
+					log.Printf("📦 [倉位更新] 持倉: %s | 均價: %s", pos.Amount, pos.EntryPrice)
 				}
 			}
 		})

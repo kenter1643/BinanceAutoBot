@@ -23,6 +23,10 @@ class MACD5MinStrategy(BaseStrategy):
         self.signal_span = strat_config.get("macd_signal", 9)
         self.agg = strat_config.get("aggressiveness", 5.0)  # 吃单滑点
 
+        # 🛡️ 絕對風控參數 (預設：虧損 2% 斷臂求生，獲利 5% 落袋為安)
+        self.stop_loss_pct = strat_config.get("stop_loss", 0.02)
+        self.take_profit_pct = strat_config.get("take_profit", 0.05)
+
         self.last_check_time = 0
 
         if active_env == "mainnet":
@@ -74,7 +78,7 @@ class MACD5MinStrategy(BaseStrategy):
             print(f"  [⚠️ K线运算异常] {e}")
             return 0
 
-    def on_tick(self, book, current_position=0.0):
+    def on_tick(self, book, current_position=0.0, entry_price=0.0):
         """
         结合盘口与真实仓位，执行 MACD 状态机
         current_position > 0 代表持有多单
@@ -96,6 +100,49 @@ class MACD5MinStrategy(BaseStrategy):
 
         best_bid = float(bids[0]["p"])  # 买一价 (对手盘: 用于卖出)
         best_ask = float(asks[0]["p"])  # 卖一价 (对手盘: 用于买入)
+
+        # ==========================================
+        # 🛡️ [最高優先級] 硬核風控攔截器 (TP/SL)
+        # 只要有倉位，每一幀盤口都會計算實時浮動盈虧！
+        # ==========================================
+        if current_position != 0 and entry_price > 0:
+            # 計算實時盈虧百分比 (PnL %)
+            if current_position > 0:  # 多單浮盈計算
+                pnl_pct = (best_bid - entry_price) / entry_price
+            else:  # 空單浮盈計算
+                pnl_pct = (entry_price - best_ask) / entry_price
+
+            # 觸發絕對止損 (Stop Loss)
+            if pnl_pct <= -self.stop_loss_pct:
+                print(
+                    f"\n🩸 [硬核止損觸發] 當前浮虧 {pnl_pct * 100:.2f}% (大於設定的 {self.stop_loss_pct * 100}%)！無條件斷臂平倉！")
+                self.last_check_time = current_time + 10.0  # 平倉後強制冷卻 10 秒
+                return {
+                    "symbol": self.symbol,
+                    "side": "SELL" if current_position > 0 else "BUY",
+                    "quantity": abs(current_position),
+                    "price": best_bid - self.agg if current_position > 0 else best_ask + self.agg,
+                    "reason": "Hard Stop Loss"
+                }
+
+            # 觸發絕對止盈 (Take Profit)
+            elif pnl_pct >= self.take_profit_pct:
+                print(f"\n💰 [硬核止盈觸發] 當前浮盈 {pnl_pct * 100:.2f}%！落袋為安！")
+                self.last_check_time = current_time + 10.0
+                return {
+                    "symbol": self.symbol,
+                    "side": "SELL" if current_position > 0 else "BUY",
+                    "quantity": abs(current_position),
+                    "price": best_bid - self.agg if current_position > 0 else best_ask + self.agg,
+                    "reason": "Hard Take Profit"
+                }
+
+        # ==========================================
+        # 🧠 如果風控沒觸發，才進入常規的 MACD 趨勢檢查
+        # ==========================================
+        if current_time - self.last_check_time < self.check_interval:
+            return None
+        self.last_check_time = current_time
 
         # 3. 获取 MACD 趋势
         trend = self.get_macd_trend()

@@ -116,20 +116,26 @@ class QuantEngine:
                 pos_key = f"Position:{self.symbol}"
                 pos_str = self.redis_client.get(pos_key)
 
+                # 🌟 [新增] 讀取開倉均價
+                ep_key = f"EntryPrice:{self.symbol}"
+                ep_str = self.redis_client.get(ep_key)
+
                 # 币安推送的仓位是字符串形式的数字，如果是空说明还没建仓
                 current_position = float(pos_str) if pos_str else 0.0
+                entry_price = float(ep_str) if ep_str else 0.0  # 取得真實均價
 
                 # 终端心跳展示：把仓位也打印出来
                 if current_id % 10 == 0:
                     bids = book.get("b", [])
                     asks = book.get("a", [])
                     if bids and asks:
+                        # 🌟 讓日誌也顯示均價，看起來更專業
                         sys.stdout.write(
-                            f"\r[{current_id}] 盘口心跳... 买一:{bids[0]['p']} | 卖一:{asks[0]['p']} | 📦 当前仓位: {current_position}   ")
+                            f"\r[{current_id}] 買一:{bids[0]['p']} | 賣一:{asks[0]['p']} | 📦 倉位: {current_position} (均價:{entry_price})   ")
                         sys.stdout.flush()
 
                 # 💡 核心修改：把当前的真实仓位也传给策略大脑！
-                signal = self.strategy.on_tick(book, current_position)
+                signal = self.strategy.on_tick(book, current_position, entry_price)
 
                 # 把盘口数据喂给策略大脑，获取信号
                 # signal = self.strategy.on_tick(book)
