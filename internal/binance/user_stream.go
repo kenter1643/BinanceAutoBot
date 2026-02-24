@@ -9,18 +9,21 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// UserDataEvent 定义极其精简的私有推送事件结构 (过滤掉无关的冗余字段)
+// internal/binance/user_stream.go
+
+// 🌟 终极防弹版 UserDataEvent 结构体
 type UserDataEvent struct {
-	Event   string `json:"e"` // 事件类型, 例如 "ACCOUNT_UPDATE"
-	Account struct {
+	EventType string `json:"e"` // 严格隔离：接收小写 e (字符串，例如 "ACCOUNT_UPDATE")
+	EventTime int64  `json:"E"` // 严格隔离：吸收大写 E (数字时间戳，防止解析器崩溃)
+	Account   struct {
 		Balances []struct {
-			Asset   string `json:"a"`  // 资产名, 如 USDT
-			Balance string `json:"wb"` // 钱包余额 (Wallet Balance)
+			Asset   string `json:"a"`
+			Balance string `json:"wb"`
 		} `json:"B"`
 		Positions []struct {
-			Symbol     string `json:"s"`  // 交易对, 如 BTCUSDT
-			Amount     string `json:"pa"` // 持仓量 (正数做多, 负数做空)
-			EntryPrice string `json:"ep"` // 🌟 新增：開倉均價
+			Symbol     string `json:"s"`
+			Amount     string `json:"pa"`
+			EntryPrice string `json:"ep"`
 		} `json:"P"`
 	} `json:"a"`
 }
@@ -82,6 +85,7 @@ func StartUserDataStream(ctx context.Context, wsURL string, onUpdate func(UserDa
 		// ==========================================
 
 		// 内层循环：持续读取数据
+		// 内层循环：持续读取数据
 		for {
 			_, message, err := conn.ReadMessage()
 			if err != nil {
@@ -89,10 +93,33 @@ func StartUserDataStream(ctx context.Context, wsURL string, onUpdate func(UserDa
 				break // 跳出内层循环，触发重连
 			}
 
-			var event UserDataEvent
-			if err := json.Unmarshal(message, &event); err == nil {
-				if event.Event == "ACCOUNT_UPDATE" {
-					onUpdate(event)
+			// 🌟 1. 核心修复：先用一个通用的 map 解析，把所有事件的“真实面目”打印出来！
+			var rawMsg map[string]interface{}
+			if err := json.Unmarshal(message, &rawMsg); err != nil {
+				log.Printf("[UserStream] ❌ 无法解析的原始 JSON: %s", string(message))
+				continue
+			}
+
+			eventType, _ := rawMsg["e"].(string)
+
+			// 🌟 2. 捕捉【资产与仓位更新】
+			if eventType == "ACCOUNT_UPDATE" {
+				log.Printf("📥 [UserStream] 收到资产更新 (ACCOUNT_UPDATE)")
+
+				var event UserDataEvent
+				if err := json.Unmarshal(message, &event); err == nil {
+					onUpdate(event) // 将精确的结构体丢给 main.go 处理
+				} else {
+					// 如果解析失败，把红牌亮出来！
+					log.Printf("❌ [UserStream] 结构体解析失败: %v | 原始数据: %s", err, string(message))
+				}
+			} else if eventType == "ORDER_TRADE_UPDATE" {
+				// 🌟 3. 捕捉【订单成交状态更新】(极其重要，这是发单后最早回来的消息)
+				orderData, ok := rawMsg["o"].(map[string]interface{})
+				if ok {
+					status, _ := orderData["X"].(string) // 订单当前状态 (NEW, FILLED, CANCELED)
+					symbol, _ := orderData["s"].(string)
+					log.Printf("🔔 [UserStream] 订单流转 -> [%s] 状态变为: %s", symbol, status)
 				}
 			}
 		}

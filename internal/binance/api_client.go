@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	_ "strings"
 	"time"
 )
 
@@ -159,73 +160,58 @@ type OrderRequest struct {
 	NewClientOrderID string  // [极度重要] 客户端自定义的唯一订单ID，用于防重发和回溯
 }
 
-// PlaceOrder 发送 U 本位合约订单
-func (c *APIClient) PlaceOrder(req OrderRequest) (string, error) {
-	endpoint := "/fapi/v1/order"
-
-	// 1. 构造请求参数
+// PlaceOrder 发送限价单，并返回完整的币安响应数据和错误信息
+func (c *APIClient) PlaceOrder(symbol, side, orderType string, quantity, price float64) (map[string]interface{}, error) {
 	params := url.Values{}
-	params.Add("symbol", req.Symbol)
-	params.Add("side", req.Side)
-	if req.PositionSide != "" {
-		params.Add("positionSide", req.PositionSide)
-	}
-	params.Add("type", req.Type)
-
-	// 在量化中，数量和价格必须严格按照交易所规定的精度进行格式化 (例如 BTC 通常是 3 位数小数)
-	// 这里为了简化，我们先用 %f 输出，并在实盘中建议手写精度截断器
-	params.Add("quantity", fmt.Sprintf("%f", req.Quantity))
-
-	if req.Type == "LIMIT" {
-		params.Add("price", fmt.Sprintf("%f", req.Price))
-		params.Add("timeInForce", req.TimeInForce) // 限价单必填，如 "GTC"
-	}
-
-	// 注入客户端自定义 ID，这是量化系统的基石，防止因为网络超时导致的重复下单
-	if req.NewClientOrderID != "" {
-		params.Add("newClientOrderId", req.NewClientOrderID)
-	}
-
-	// 核心安全参数
+	params.Add("symbol", symbol)
+	params.Add("side", side)
+	params.Add("type", orderType)
+	params.Add("quantity", fmt.Sprintf("%.3f", quantity)) // 注意币安的精度要求
+	params.Add("price", fmt.Sprintf("%.2f", price))
+	params.Add("timeInForce", "GTC")
 	params.Add("timestamp", fmt.Sprintf("%d", time.Now().UnixMilli()))
-	params.Add("recvWindow", "5000")
 
-	// 2. 签名与拼接
 	queryString := params.Encode()
-	signature := c.createSignature(queryString)
-	fullURL := fmt.Sprintf("%s%s?%s&signature=%s", c.BaseURL, endpoint, queryString, signature)
+	mac := hmac.New(sha256.New, []byte(c.APISecret))
+	mac.Write([]byte(queryString))
+	signature := hex.EncodeToString(mac.Sum(nil))
 
-	// 3. 极其重要：发单必须是 HTTP POST 请求！
-	httpReq, err := http.NewRequest(http.MethodPost, fullURL, nil)
+	// ==========================================
+	// 🚨 核心修复：不走 Body，直接把所有参数暴力拼接在 URL 后面！
+	// ==========================================
+	reqURL := fmt.Sprintf("%s/fapi/v1/order?%s&signature=%s", c.BaseURL, queryString, signature)
+
+	// 注意这里：Body 直接传 nil
+	req, err := http.NewRequest(http.MethodPost, reqURL, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	httpReq.Header.Add("X-MBX-APIKEY", c.APIKey)
+	req.Header.Set("X-MBX-APIKEY", c.APIKey)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// ==========================================
 
-	// 4. 执行请求
-	resp, err := c.HTTPClient.Do(httpReq)
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", err // 这里返回的通常是网络层错误，如连接超时
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// 5. 解析结果
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
+	body, _ := io.ReadAll(resp.Body)
+
+	// 🚨 核心逻辑：无论成功失败，都尝试把返回的 JSON 解析成 map
+	var respData map[string]interface{}
+	if err := json.Unmarshal(body, &respData); err != nil {
+		return nil, fmt.Errorf("解析币安返回值失败: %s", string(body))
 	}
 
+	// 如果 HTTP 状态码不是 200，说明发单被拒，把币安的原始报错提取出来抛给 main.go
 	if resp.StatusCode != http.StatusOK {
-		// 这里返回的通常是业务层错误，比如余额不足、精度不对等
-		return "", fmt.Errorf("API Error: Status %d, Response: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf("HTTP %d - %s", resp.StatusCode, string(body))
 	}
 
-	var prettyJSON interface{}
-	json.Unmarshal(bodyBytes, &prettyJSON)
-	output, _ := json.MarshalIndent(prettyJSON, "", "  ")
-
-	return string(output), nil
+	// 成功则返回订单信息 map
+	return respData, nil
 }
 
 // CancelOrderRequest 撤单请求参数

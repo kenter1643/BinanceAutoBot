@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -93,17 +91,26 @@ func main() {
 			wsBase = "wss://fstream.binance.com/ws/" // 主网
 		}
 		userDataWSURL := wsBase + listenKey
+
+		// 🌟 修复点：将 event.Event 改为 event.EventType
 		go binance.StartUserDataStream(ctx, userDataWSURL, func(event binance.UserDataEvent) {
-			for _, bal := range event.Account.Balances {
-				if bal.Asset == "USDT" {
-					_ = rdb.Set(ctx, "Wallet:USDT", bal.Balance, 0).Err()
+			// 🌟 把 event.Event 改成 event.EventType
+			if event.EventType == "ACCOUNT_UPDATE" {
+				// 1. 同步最新钱包余额
+				for _, bal := range event.Account.Balances {
+					if bal.Asset == "USDT" {
+						_ = rdb.Set(ctx, "Wallet:USDT", bal.Balance, 0).Err()
+						log.Printf("💰 [Redis同步] 余额覆写 -> USDT: %s", bal.Balance)
+					}
 				}
-			}
-			for _, pos := range event.Account.Positions {
-				if pos.Symbol == symbol {
-					_ = rdb.Set(ctx, "Position:"+symbol, pos.Amount, 0).Err()
-					_ = rdb.Set(ctx, "EntryPrice:"+symbol, pos.EntryPrice, 0).Err()
-					log.Printf("📦 [倉位更新] 持倉: %s | 均價: %s", pos.Amount, pos.EntryPrice)
+
+				// 2. 同步最新仓位与均价
+				for _, pos := range event.Account.Positions {
+					if pos.Symbol == symbol {
+						_ = rdb.Set(ctx, "Position:"+symbol, pos.Amount, 0).Err()
+						_ = rdb.Set(ctx, "EntryPrice:"+symbol, pos.EntryPrice, 0).Err()
+						log.Printf("💾 [Redis同步] 仓位覆写 -> %s: 数量 %s (均价: %s)", symbol, pos.Amount, pos.EntryPrice)
+					}
 				}
 			}
 		})
@@ -125,15 +132,73 @@ func main() {
 				}
 			}
 		}()
+
+		// ==========================================
+		// 🛡️ 新增：企業級狀態對帳協程 (State Reconciliation)
+		// 目的：每 5 分鐘強制拉取一次 REST API 真實狀態，防止 WS 漏接導致的「幽靈倉位」
+		// ==========================================
+		go func() {
+			// 設定每 5 分鐘對帳一次 (頻率不要太高，以免消耗 API 權重)
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					log.Println("⏱️ [定時對帳] 啟動 REST API 狀態兜底同步...")
+
+					// 1. 強制核對並覆寫錢包餘額
+					if bal, err := apiClient.GetUSDTBalance(); err == nil {
+						_ = rdb.Set(ctx, "Wallet:USDT", bal, 0).Err()
+					} else {
+						log.Printf("⚠️ [定時對帳] 餘額同步失敗: %v", err)
+					}
+
+					// 2. 強制核對並覆寫真實倉位與均價
+					if posAmount, posEp, err := apiClient.GetPosition(symbol); err == nil {
+						_ = rdb.Set(ctx, "Position:"+symbol, posAmount, 0).Err()
+						_ = rdb.Set(ctx, "EntryPrice:"+symbol, posEp, 0).Err()
+						// log.Printf("⏱️ [定時對帳] 倉位核對完成 -> %s: 數量 %s", symbol, posAmount) // 怕日誌太吵可以註解掉這行
+					} else {
+						log.Printf("⚠️ [定時對帳] 倉位同步失敗: %v", err)
+					}
+				}
+			}
+		}()
+		// ==========================================
 	}
 	// ==========================================
 
 	// 3. 启动行情状态机
+	// 3. 启动行情状态机 (🌟 升级为完全事件驱动的零延迟架构)
 	ob := orderbook.NewLocalOrderBook(symbol)
+	redisKey := "OrderBook:" + symbol
+
 	wsClient := &binance.WSClient{
 		URL: activeEnv.WSDepthURL,
 		OnDepthFunc: func(event binance.WSDepthEvent) {
+			// 1. 毫秒级处理增量事件
 			_ = ob.ProcessDepthEvent(event)
+
+			// 2. 线程安全地检测序列号断层，重新拉取快照
+			if ob.CheckAndClearResync() {
+				log.Printf("[Main] 🔄 OrderBook 断层，重新拉取快照...")
+				if snap, err := binance.GetDepthSnapshot(activeEnv.RestBaseURL, symbol, 1000); err == nil {
+					ob.InitWithSnapshot(snap)
+				}
+				return
+			}
+
+			// 3. 🌟 绝对的零延迟：只要状态机 Ready，立马刷入 Redis！不等任何 Ticker！
+			if ob.IsReady && ob.Synced {
+				data, _ := json.Marshal(ob.GetTopN(20))
+				// 使用一个极短的 context 防止 Redis 阻塞 WS 接收协程
+				rCtx, rCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+				_ = rdb.Set(rCtx, redisKey, data, 0).Err()
+				rCancel()
+			}
 		},
 	}
 	go wsClient.Start(ctx)
@@ -147,75 +212,64 @@ func main() {
 		log.Printf("[Main] ⚠️ 快照拉取失败 (测试网拥堵): %v", err)
 	}
 
-	// 4. 异步 Redis 刷盘
-	go func() {
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		redisKey := "OrderBook:" + symbol
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				// 线程安全地检测序列号断层，重新拉取快照
-				if ob.CheckAndClearResync() {
-					log.Printf("[Main] 🔄 OrderBook 断层，重新拉取快照...")
-					if snap, err := binance.GetDepthSnapshot(activeEnv.RestBaseURL, symbol, 1000); err == nil {
-						ob.InitWithSnapshot(snap)
-					} else {
-						log.Printf("[Main] ⚠️ 快照重新拉取失败: %v", err)
-					}
-					continue
-				}
-				if !ob.IsReady || !ob.Synced {
-					continue
-				}
-				data, _ := json.Marshal(ob.GetTopN(20))
-				rCtx, rCancel := context.WithTimeout(ctx, 200*time.Millisecond)
-				_ = rdb.Set(rCtx, redisKey, data, 0).Err()
-				rCancel()
-			}
-		}
-	}()
-
 	// 5. 【核心】启动 UDS (Unix Domain Socket) HTTP 指令接收器
+	// 🌟 增强版：UDS HTTP 服务的处理逻辑 (带极详尽的日志打印)
 	http.HandleFunc("/api/order", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
+		var req struct {
+			Symbol   string  `json:"symbol"`
+			Side     string  `json:"side"`
+			Quantity float64 `json:"quantity"`
+			Price    float64 `json:"price"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("❌ [UDS 接收] 解析 Python 指令失败: %v", err)
+			http.Error(w, "解析请求失败", http.StatusBadRequest)
+			return
+		}
+		// 🚨 1. 新增：嚴格校驗與防呆攔截
+		if req.Symbol == "" {
+			log.Printf("❌ [嚴重錯誤] 拒絕發單！Python 傳來的 UDS 指令中 'symbol' 是空的！")
+			http.Error(w, "symbol cannot be empty", http.StatusBadRequest)
 			return
 		}
 
-		body, _ := io.ReadAll(r.Body)
-		var cmd LocalCommandReq
-		if err := json.Unmarshal(body, &cmd); err != nil {
-			http.Error(w, "Invalid JSON", http.StatusBadRequest)
-			return
-		}
+		// 🚨 2. 修改：把 Python 傳來的真實 Symbol 也打印出來確認！
+		log.Printf("🤖 [UDS 接收] 收到 Python 引擎指令: [%s] %s %.4f @ %.2f", req.Symbol, req.Side, req.Quantity, req.Price)
 
-		log.Printf("🤖 [UDS 接收] 收到 Python 极速指令: %s %.4f @ %.2f", cmd.Side, cmd.Quantity, cmd.Price)
+		startTime := time.Now()
 
-		// 组装并调用你的 API 客户端发单
-		orderReq := binance.OrderRequest{
-			Symbol:           symbol,
-			Side:             cmd.Side,
-			Type:             "LIMIT",
-			Quantity:         cmd.Quantity,
-			Price:            cmd.Price,
-			TimeInForce:      "GTC",
-			NewClientOrderID: fmt.Sprintf("bot_%d", time.Now().UnixMilli()),
-		}
+		// 调用 API 客户端发起真实的交易请求
+		respData, err := apiClient.PlaceOrder(req.Symbol, req.Side, "LIMIT", req.Quantity, req.Price)
 
-		// 这里调用的就是上面修复点初始化的 apiClient
-		resultJSON, err := apiClient.PlaceOrder(orderReq)
-		if err != nil {
-			log.Printf("❌ [执行失败] %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		log.Printf("✅ [执行成功] 极速订单已发送至币安！")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(resultJSON))
+
+		// ==========================================
+		// 🚨 核心修改：极详尽的失败与成功日志打印
+		// ==========================================
+		if err != nil {
+			// 如果发单失败，极其醒目地打印币安返回的真实报错（例如 Insufficient Margin）
+			log.Printf("❌ [执行失败] 极速发单被币安拒绝！耗时: %v", time.Since(startTime))
+			log.Printf("⚠️ [错误详情]: %v", err)
+
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+			})
+			return
+		}
+
+		// 如果发单成功，提取关键字段打印战报
+		log.Printf("✅ [执行成功] 订单已发送至币安！耗时: %v", time.Since(startTime))
+
+		// 容错提取返回值（防止某些字段为空导致 panic）
+		orderId := respData["orderId"]
+		status := respData["status"]
+		avgPrice := respData["avgPrice"]
+
+		log.Printf("📊 [订单回执] OrderID: %v | 状态: %v | 均价: %v", orderId, status, avgPrice)
+
+		// 将完整的成功回执返回给 Python 引擎
+		json.NewEncoder(w).Encode(respData)
 	})
 
 	go func() {

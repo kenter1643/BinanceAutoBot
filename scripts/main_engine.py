@@ -6,8 +6,8 @@ import sys
 import requests_unixsocket
 
 from macd_strategy import MACD5MinStrategy
-# 导入策略模块
-from strategies import SpreadBreakoutStrategy
+from strategies import SpreadBreakoutStrategy  # noqa: F401 - available for strategy switching
+from obi_strategy import OBIMomentumStrategy
 
 
 class QuantEngine:
@@ -18,32 +18,18 @@ class QuantEngine:
         self.session = requests_unixsocket.Session()
         self.uds_url = 'http+unix://%2Ftmp%2Fquant_engine.sock/api/order'
 
-        # ==========================================
-        # 🚨 就是这里！必须先定义 strat_config 变量
-        # 试图从 config.json 获取 "strategy" 节点，如果获取不到就给个空字典 {}兜底
-        # ==========================================
         strat_config = self.config.get('strategy', {})
         active_env = self.config['binance']['active_env']
+        self.last_print_time = 0.0
 
-        # 这样下面在传参的时候，IDE 就认得 strat_config 了！
-        self.strategy = MACD5MinStrategy(
+        self.strategy = OBIMomentumStrategy(
             symbol=self.symbol,
-            strat_config=strat_config,  # <--- 这里就不会再报红线了
+            strat_config=strat_config,
             active_env=active_env
         )
 
-        # 🌟 【关键修改】将阈值降到 0.1，保证只要有盘口就百分百触发！
-        """
-        self.strategy = SpreadBreakoutStrategy(
-            symbol=self.symbol,
-            threshold=0.1,  # <--- 极低阈值测试
-            quantity=0.01,
-            cooldown=10.0
-        )
-        """
-
-
-    def _load_config(self):
+    @staticmethod
+    def _load_config():
         config_path = os.path.join(os.path.dirname(__file__), '..', 'config.json')
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
@@ -66,9 +52,11 @@ class QuantEngine:
     def execute_signal(self, signal):
         """执行策略模块产生的标准交易信号"""
         print(f"\n🚨 [主引擎] 接收到开火信号: {signal['reason']}")
-        print(f"🎯 [主引擎] 正在下达指令: 以 {signal['price']:.2f} 做多 {signal['quantity']} {signal['symbol']}")
+        print(f"🎯 [主引擎] 正在下达指令: {signal['side']} {signal['quantity']} {self.symbol} @ {signal['price']:.2f}")
 
         payload = {
+            # 🌟 修复 1：干掉硬编码的 "BTCUSDT"，直接使用初始化时读取的 self.symbol
+            "symbol": self.symbol,
             "side": signal['side'],
             "quantity": signal['quantity'],
             "price": signal['price']
@@ -76,7 +64,8 @@ class QuantEngine:
 
         try:
             start_t = time.perf_counter()
-            resp = self.session.post(self.uds_url, json=payload, timeout=2.0)
+            # 🌟 修复 2：把底层 UDS 通信的超时时间从 2.0 延长到 10.0，防止 Testnet 偶尔卡顿导致误判
+            resp = self.session.post(self.uds_url, json=payload, timeout=10.0)
             latency = (time.perf_counter() - start_t) * 1000
 
             if resp.status_code == 200:
@@ -97,12 +86,19 @@ class QuantEngine:
         redis_key = f"OrderBook:{self.symbol}"
         last_update_id = 0
 
+        # ==========================================
+        # ⏱️ 新增：性能与延迟监控探针
+        # ==========================================
+        tick_count = 0
+        monitor_start_time = time.time()
+        last_tick_time = time.time()
+
         try:
             while True:
                 try:
                     raw_data = self.redis_client.get(redis_key)
                     if not raw_data:
-                        time.sleep(0.05)
+                        time.sleep(0.01)  # 稍微降低睡眠时间，提高轮询精度
                         continue
 
                     book = json.loads(raw_data)
@@ -111,7 +107,22 @@ class QuantEngine:
                     if current_id == last_update_id:
                         time.sleep(0.005)
                         continue
+
+                    # 🚀 计算单次 Tick 间隔
+                    now = time.time()
+                    tick_interval_ms = (now - last_tick_time) * 1000
+                    last_tick_time = now
+                    tick_count += 1
+
                     last_update_id = current_id
+
+                    # ⏱️ 每隔 60 秒，打印一次系统的真实吞吐量！
+                    if now - monitor_start_time >= 60.0:
+                        sys.stdout.write(
+                            f"\r⚡ [性能监控] 过去60秒处理 {tick_count} 帧 | 平均延迟: {60000 / tick_count if tick_count else 0:.1f}ms/帧    \n")
+                        sys.stdout.flush()
+                        tick_count = 0
+                        monitor_start_time = now
 
                     # 从 Redis 读取真实仓位和开仓均价
                     pos_key = f"Position:{self.symbol}"
@@ -125,7 +136,7 @@ class QuantEngine:
 
                     # 使用时间控制心跳打印
                     now = time.time()
-                    if now - getattr(self, 'last_print_time', 0) > 2.0:
+                    if now - getattr(self, 'last_print_time', 0) > 1.0:
                         bids = book.get("b", [])
                         asks = book.get("a", [])
                         if bids and asks:
@@ -147,7 +158,7 @@ class QuantEngine:
                                     pnl_display = f" | 🔴 浮亏: {pnl_usdt:.2f} USDT ({pnl_pct:.2f}%)"
 
                             sys.stdout.write(
-                                f"\r[{current_id}] 买一:{best_bid} | 卖一:{best_ask} | 📦 仓位: {current_position} (均价:{entry_price:.2f}){pnl_display}    ")
+                                f"\rtime:{now}[{current_id}] 买一:{best_bid} | 卖一:{best_ask} | 📦 仓位: {current_position} (均价:{entry_price:.2f}){pnl_display}    ")
                             sys.stdout.flush()
                             self.last_print_time = now
 

@@ -5,7 +5,7 @@ class BaseStrategy:
     def __init__(self, symbol):
         self.symbol = symbol
 
-    def on_tick(self, book, current_position):
+    def on_tick(self, book, current_position=0.0, entry_price=0.0):
         raise NotImplementedError("策略必须实现 on_tick 方法")
 
 

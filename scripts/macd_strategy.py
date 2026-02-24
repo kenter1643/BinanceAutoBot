@@ -44,7 +44,8 @@ class MACD5MinStrategy(BaseStrategy):
                 "interval": "5m",
                 "limit": 50  # 只需要最近 50 根来算 EMA(12, 26) 绰绰有余
             }
-            resp = requests.get(self.api_url, params=params, timeout=3)
+            resp = requests.get(self.api_url, params=params, timeout=(5.0, 10.0))
+
             if resp.status_code != 200:
                 return 0
 
@@ -140,10 +141,6 @@ class MACD5MinStrategy(BaseStrategy):
         # ==========================================
         # 🧠 如果風控沒觸發，才進入常規的 MACD 趨勢檢查
         # ==========================================
-        if current_time - self.last_check_time < self.check_interval:
-            return None
-        self.last_check_time = current_time
-
         # 3. 获取 MACD 趋势
         trend = self.get_macd_trend()
 
