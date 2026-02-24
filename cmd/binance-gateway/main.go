@@ -93,7 +93,6 @@ func main() {
 			wsBase = "wss://fstream.binance.com/ws/" // 主网
 		}
 		userDataWSURL := wsBase + listenKey
-		// 🌟 修改處 2：UserDataStream 推送更新 (約 100 行附近)
 		go binance.StartUserDataStream(ctx, userDataWSURL, func(event binance.UserDataEvent) {
 			for _, bal := range event.Account.Balances {
 				if bal.Asset == "USDT" {
@@ -103,11 +102,29 @@ func main() {
 			for _, pos := range event.Account.Positions {
 				if pos.Symbol == symbol {
 					_ = rdb.Set(ctx, "Position:"+symbol, pos.Amount, 0).Err()
-					_ = rdb.Set(ctx, "EntryPrice:"+symbol, pos.EntryPrice, 0).Err() // 同步更新均價
+					_ = rdb.Set(ctx, "EntryPrice:"+symbol, pos.EntryPrice, 0).Err()
 					log.Printf("📦 [倉位更新] 持倉: %s | 均價: %s", pos.Amount, pos.EntryPrice)
 				}
 			}
 		})
+
+		// 每 30 分钟续期 ListenKey，防止 60 分钟后私有流断开
+		go func() {
+			ticker := time.NewTicker(30 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := apiClient.RenewListenKey(listenKey); err != nil {
+						log.Printf("[Main] ⚠️ ListenKey 续期失败: %v", err)
+					} else {
+						log.Printf("[Main] ✅ ListenKey 续期成功")
+					}
+				}
+			}
+		}()
 	}
 	// ==========================================
 
@@ -140,11 +157,23 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// 线程安全地检测序列号断层，重新拉取快照
+				if ob.CheckAndClearResync() {
+					log.Printf("[Main] 🔄 OrderBook 断层，重新拉取快照...")
+					if snap, err := binance.GetDepthSnapshot(activeEnv.RestBaseURL, symbol, 1000); err == nil {
+						ob.InitWithSnapshot(snap)
+					} else {
+						log.Printf("[Main] ⚠️ 快照重新拉取失败: %v", err)
+					}
+					continue
+				}
 				if !ob.IsReady || !ob.Synced {
 					continue
 				}
 				data, _ := json.Marshal(ob.GetTopN(20))
-				_ = rdb.Set(ctx, redisKey, data, 0).Err()
+				rCtx, rCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+				_ = rdb.Set(rCtx, redisKey, data, 0).Err()
+				rCancel()
 			}
 		}
 	}()
@@ -197,6 +226,11 @@ func main() {
 		listener, err := net.Listen("unix", sockFile)
 		if err != nil {
 			log.Fatalf("Socket listen error: %v", err)
+		}
+
+		// 限制 socket 文件权限为仅当前用户可读写，防止其他用户注入恶意订单
+		if err := os.Chmod(sockFile, 0600); err != nil {
+			log.Fatalf("Socket chmod error: %v", err)
 		}
 
 		log.Printf("[Main] 🎛️ 本地 UDS 极速通道已启动，监听文件: %s", sockFile)

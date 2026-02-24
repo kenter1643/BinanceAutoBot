@@ -17,18 +17,24 @@ type WSClient struct {
 
 // Start 启动客户端并阻塞运行，直到 ctx 被取消
 func (c *WSClient) Start(ctx context.Context) {
+	backoff := 2 * time.Second
+	const maxBackoff = 60 * time.Second
+
 	for {
 		err := c.connectAndRead(ctx)
 		if err != nil {
-			log.Printf("[WS Client] Connection error: %v. Reconnecting in 2 seconds...", err)
+			log.Printf("[WS Client] Connection error: %v. Reconnecting in %s...", err, backoff)
 		}
 
-		// 检查是否是因为上下文取消（系统退出）而断开的
 		select {
 		case <-ctx.Done():
 			log.Println("[WS Client] Context canceled, exiting reconnect loop.")
 			return
-		case <-time.After(2 * time.Second): // 简单的固定延迟重连 (实盘建议用指数退避算法)
+		case <-time.After(backoff):
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 			continue
 		}
 	}

@@ -55,10 +55,10 @@ class MACD5MinStrategy(BaseStrategy):
             df['close'] = df['close'].astype(float)
 
             # 向量化计算 MACD (Fast=12, Slow=26, Signal=9)
-            exp1 = df['close'].ewm(span=12, adjust=False).mean()
-            exp2 = df['close'].ewm(span=26, adjust=False).mean()
+            exp1 = df['close'].ewm(span=self.fast_span, adjust=False).mean()
+            exp2 = df['close'].ewm(span=self.slow_span, adjust=False).mean()
             macd = exp1 - exp2
-            signal = macd.ewm(span=9, adjust=False).mean()
+            signal = macd.ewm(span=self.signal_span, adjust=False).mean()
             hist = macd - signal  # MACD 柱状图 (Histogram)
 
             # 取最新两根 K 线的柱状图值

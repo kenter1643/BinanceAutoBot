@@ -28,22 +28,33 @@ type UserDataEvent struct {
 // StartUserDataStream 启动私有 WebSocket 连接，并内置断线自动重连机制
 func StartUserDataStream(ctx context.Context, wsURL string, onUpdate func(UserDataEvent)) {
 	dialer := websocket.DefaultDialer
+	backoff := 3 * time.Second
+	const maxBackoff = 60 * time.Second
 
-	// 🌟 外层循环：负责断线后的无限重连
+	// 外层循环：负责断线后的无限重连
 	for {
 		select {
 		case <-ctx.Done():
-			return // 如果主程序发出了退出信号，才真正退出
+			return
 		default:
 		}
 
 		log.Printf("[UserStream] 🔄 正在尝试连接私有资产频道...")
 		conn, _, err := dialer.Dial(wsURL, nil)
 		if err != nil {
-			log.Printf("[UserStream] ❌ 连接失败: %v, 3秒后重试...", err)
-			time.Sleep(3 * time.Second)
-			continue // 连接失败，跳过本次循环，重新尝试
+			log.Printf("[UserStream] ❌ 连接失败: %v, %s后重试...", err, backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+			continue
 		}
+		backoff = 3 * time.Second // 连接成功后重置退避时间
 
 		log.Println("[UserStream] 🛡️ 账户私有资产监听通道已建立！等待资产变动...")
 

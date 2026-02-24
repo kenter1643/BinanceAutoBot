@@ -42,6 +42,21 @@ func LoadConfig(path string) (*Config, error) {
 	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
 		return nil, err
 	}
+
+	// 环境变量优先级高于配置文件，避免明文密钥提交到代码库
+	if v := os.Getenv("BINANCE_MAINNET_API_KEY"); v != "" {
+		cfg.Binance.Mainnet.APIKey = v
+	}
+	if v := os.Getenv("BINANCE_MAINNET_API_SECRET"); v != "" {
+		cfg.Binance.Mainnet.APISecret = v
+	}
+	if v := os.Getenv("BINANCE_TESTNET_API_KEY"); v != "" {
+		cfg.Binance.Testnet.APIKey = v
+	}
+	if v := os.Getenv("BINANCE_TESTNET_API_SECRET"); v != "" {
+		cfg.Binance.Testnet.APISecret = v
+	}
+
 	return &cfg, nil
 }
 

@@ -99,50 +99,68 @@ class QuantEngine:
 
         try:
             while True:
-                raw_data = self.redis_client.get(redis_key)
-                if not raw_data:
-                    time.sleep(0.05)
-                    continue
+                try:
+                    raw_data = self.redis_client.get(redis_key)
+                    if not raw_data:
+                        time.sleep(0.05)
+                        continue
 
-                book = json.loads(raw_data)
-                current_id = book.get("u")
+                    book = json.loads(raw_data)
+                    current_id = book.get("u")
 
-                if current_id == last_update_id:
-                    time.sleep(0.005)
-                    continue
-                last_update_id = current_id
+                    if current_id == last_update_id:
+                        time.sleep(0.005)
+                        continue
+                    last_update_id = current_id
 
-                # 🌟 [新增] 从 Redis 极速读取 Go 网关同步过来的真实仓位
-                pos_key = f"Position:{self.symbol}"
-                pos_str = self.redis_client.get(pos_key)
+                    # 从 Redis 读取真实仓位和开仓均价
+                    pos_key = f"Position:{self.symbol}"
+                    pos_str = self.redis_client.get(pos_key)
 
-                # 🌟 [新增] 讀取開倉均價
-                ep_key = f"EntryPrice:{self.symbol}"
-                ep_str = self.redis_client.get(ep_key)
+                    ep_key = f"EntryPrice:{self.symbol}"
+                    ep_str = self.redis_client.get(ep_key)
 
-                # 币安推送的仓位是字符串形式的数字，如果是空说明还没建仓
-                current_position = float(pos_str) if pos_str else 0.0
-                entry_price = float(ep_str) if ep_str else 0.0  # 取得真實均價
+                    current_position = float(pos_str) if pos_str else 0.0
+                    entry_price = float(ep_str) if ep_str else 0.0
 
-                # 终端心跳展示：把仓位也打印出来
-                if current_id % 10 == 0:
-                    bids = book.get("b", [])
-                    asks = book.get("a", [])
-                    if bids and asks:
-                        # 🌟 讓日誌也顯示均價，看起來更專業
-                        sys.stdout.write(
-                            f"\r[{current_id}] 買一:{bids[0]['p']} | 賣一:{asks[0]['p']} | 📦 倉位: {current_position} (均價:{entry_price})   ")
-                        sys.stdout.flush()
+                    # 使用时间控制心跳打印
+                    now = time.time()
+                    if now - getattr(self, 'last_print_time', 0) > 2.0:
+                        bids = book.get("b", [])
+                        asks = book.get("a", [])
+                        if bids and asks:
+                            best_bid = float(bids[0]['p'])
+                            best_ask = float(asks[0]['p'])
 
-                # 💡 核心修改：把当前的真实仓位也传给策略大脑！
-                signal = self.strategy.on_tick(book, current_position, entry_price)
+                            pnl_display = ""
+                            if current_position != 0 and entry_price > 0:
+                                if current_position > 0:
+                                    pnl_usdt = (best_bid - entry_price) * current_position
+                                    pnl_pct = (best_bid - entry_price) / entry_price * 100
+                                else:
+                                    pnl_usdt = (entry_price - best_ask) * abs(current_position)
+                                    pnl_pct = (entry_price - best_ask) / entry_price * 100
 
-                # 把盘口数据喂给策略大脑，获取信号
-                # signal = self.strategy.on_tick(book)
+                                if pnl_usdt >= 0:
+                                    pnl_display = f" | 🟢 浮盈: +{pnl_usdt:.2f} USDT (+{pnl_pct:.2f}%)"
+                                else:
+                                    pnl_display = f" | 🔴 浮亏: {pnl_usdt:.2f} USDT ({pnl_pct:.2f}%)"
 
-                # 如果策略决定开火，交由执行路由处理
-                if signal:
-                    self.execute_signal(signal)
+                            sys.stdout.write(
+                                f"\r[{current_id}] 买一:{best_bid} | 卖一:{best_ask} | 📦 仓位: {current_position} (均价:{entry_price:.2f}){pnl_display}    ")
+                            sys.stdout.flush()
+                            self.last_print_time = now
+
+                    signal = self.strategy.on_tick(book, current_position, entry_price)
+
+                    if signal:
+                        self.execute_signal(signal)
+
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    print(f"\n⚠️ [主循环异常] {e}，继续运行...")
+                    time.sleep(0.1)
 
         except KeyboardInterrupt:
             print("\n🛑 接收到退出信号，主引擎安全停机。")

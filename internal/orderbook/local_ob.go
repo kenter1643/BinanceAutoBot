@@ -15,8 +15,9 @@ type LocalOrderBook struct {
 	LastUpdateID int64
 	Bids         map[float64]float64
 	Asks         map[float64]float64
-	IsReady      bool // [新增] 标记是否已完成全量快照加载
-	Synced       bool // [新增] 标记是否已经完美衔接了第一帧
+	IsReady      bool
+	Synced       bool
+	NeedsResync  bool // 序列号断层时标记需要重新同步
 }
 
 func NewLocalOrderBook(symbol string) *LocalOrderBook {
@@ -79,8 +80,11 @@ func (ob *LocalOrderBook) ProcessDepthEvent(event binance.WSDepthEvent) error {
 	} else {
 		// 已经缝合后，严格校验后续序列号的连续性
 		if event.PrevFinalUpdID != ob.LastUpdateID {
-			// 测试网偶尔也会丢包，为了防止不断重连，这里先只打日志，不断开
-			log.Printf("[OrderBook Error] 🚨 序列号微小断层！期望 pu: %d, 实际: %d", ob.LastUpdateID, event.PrevFinalUpdID)
+			log.Printf("[OrderBook Error] 🚨 序列号断层！期望 pu: %d, 实际: %d，标记需要重新同步", ob.LastUpdateID, event.PrevFinalUpdID)
+			ob.IsReady = false
+			ob.Synced = false
+			ob.NeedsResync = true
+			return nil
 		}
 	}
 
@@ -112,6 +116,17 @@ func (ob *LocalOrderBook) GetTopLevels() (bids, asks int) {
 	ob.mu.RLock()
 	defer ob.mu.RUnlock()
 	return len(ob.Bids), len(ob.Asks)
+}
+
+// CheckAndClearResync 线程安全地检查并清除 NeedsResync 标志
+func (ob *LocalOrderBook) CheckAndClearResync() bool {
+	ob.mu.Lock()
+	defer ob.mu.Unlock()
+	if ob.NeedsResync {
+		ob.NeedsResync = false
+		return true
+	}
+	return false
 }
 
 // GetTopN 提取排序后的前 N 档盘口快照

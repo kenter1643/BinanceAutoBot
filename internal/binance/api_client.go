@@ -360,3 +360,29 @@ func (c *APIClient) GetPosition(symbol string) (string, string, error) {
 
 	return "0.0", "0.0", nil
 }
+
+// RenewListenKey 续期 ListenKey，必须每 30 分钟调用一次，否则连接在 60 分钟后失效
+func (c *APIClient) RenewListenKey(listenKey string) error {
+	reqURL := fmt.Sprintf("%s/fapi/v1/listenKey", c.BaseURL)
+	req, err := http.NewRequest(http.MethodPut, reqURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-MBX-APIKEY", c.APIKey)
+
+	q := req.URL.Query()
+	q.Add("listenKey", listenKey)
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("RenewListenKey 失败 [%d]: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}

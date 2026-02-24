@@ -1,0 +1,15 @@
+# 敏感配置文件，禁止提交到代码库
+config.json
+
+# Go 编译产物
+/bin/
+*.exe
+
+# Python
+__pycache__/
+*.pyc
+scripts/.venv/
+
+# IDE
+.idea/
+*.iml

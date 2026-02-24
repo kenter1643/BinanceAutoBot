@@ -1,0 +1,31 @@
+{
+  "binance": {
+    "active_env": "testnet",
+    "symbol": "BTCUSDT",
+    "mainnet": {
+      "api_key": "",
+      "api_secret": "",
+      "rest_base_url": "https://fapi.binance.com",
+      "ws_depth_url": "wss://fstream.binance.com/ws/btcusdt@depth@100ms"
+    },
+    "testnet": {
+      "api_key": "",
+      "api_secret": "",
+      "rest_base_url": "https://testnet.binancefuture.com",
+      "ws_depth_url": "wss://stream.binancefuture.com/ws/btcusdt@depth@100ms"
+    }
+  },
+  "redis": {
+    "addr": "127.0.0.1:6379",
+    "db": 0
+  },
+  "strategy": {
+    "name": "MACD5MinStrategy",
+    "quantity": 0.01,
+    "check_interval": 3.0,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "aggressiveness": 5.0
+  }
+}
